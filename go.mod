@@ -3,7 +3,7 @@ module github.com/babon21/avito-url-shortened
 go 1.15
 
 require (
-	github.com/asaskevich/govalidator v0.0.0-20200907205600-7a23bdc65eef
+	github.com/asaskevich/govalidator v0.0.0-20200907205600-7a23bdc65eef // indirect
 	github.com/jackc/pgx/v4 v4.8.1
 	github.com/jmoiron/sqlx v1.2.0
 	github.com/rs/zerolog v1.19.0
