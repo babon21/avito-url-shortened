@@ -1,0 +1,15 @@
+version: '3.1'
+
+services:
+
+  postgres:
+    image: psql
+    restart: always
+    build:
+      context: db/
+    environment:
+      POSTGRES_USER: avito
+      POSTGRES_PASSWORD: avito
+      POSTGRES_DB: avito
+    ports:
+      - 5432:5432
