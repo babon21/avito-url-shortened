@@ -15,14 +15,18 @@ type UrlShortHandler struct {
 	Db      *sqlx.DB
 }
 
-type Result struct {
+type UpdateCustomUrl struct {
 	ShortUrl  string `json:"short_url"`
 	CustomUrl string `json:"custom_url,omitempty"`
 }
 
+type ShortUrlRequest struct {
+	OriginUrl string `json:"origin_url"`
+}
+
 type Error struct {
-	Status int
-	Detail string
+	Status int    `json:"status"`
+	Detail string `json:"detail"`
 }
 
 func (h *UrlShortHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -66,8 +70,17 @@ func (h *UrlShortHandler) generateUrl(id uint64) string {
 func (h *UrlShortHandler) HandleShortUrl(w http.ResponseWriter, r *http.Request) {
 	// TODO logging
 
-	urlParam := r.FormValue("origin_url")
-	if !govalidator.IsURL(urlParam) {
+	var request ShortUrlRequest
+	err := json.NewDecoder(r.Body).Decode(&request)
+	if err != nil {
+		WriteResponseWithError(w, Error{
+			Status: http.StatusBadRequest,
+			Detail: err.Error(),
+		})
+		return
+	}
+
+	if !govalidator.IsURL(request.OriginUrl) {
 		// TODO logging
 		WriteResponseWithError(w, Error{
 			Status: http.StatusBadRequest,
@@ -77,7 +90,7 @@ func (h *UrlShortHandler) HandleShortUrl(w http.ResponseWriter, r *http.Request)
 	}
 
 	var id uint64
-	err := h.Db.QueryRow("INSERT INTO urls(origin_url) VALUES ($1) RETURNING id", urlParam).Scan(&id)
+	err = h.Db.QueryRow("INSERT INTO urls(origin_url) VALUES ($1) RETURNING id", request.OriginUrl).Scan(&id)
 	if err != nil {
 		fmt.Println(err)
 		// TODO logging
@@ -103,20 +116,32 @@ func (h *UrlShortHandler) HandleShortUrl(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	WriteSuccessResponse(w, http.StatusCreated, Result{ShortUrl: generatedUrl})
+	WriteSuccessResponse(w, http.StatusCreated, UpdateCustomUrl{ShortUrl: generatedUrl})
 }
 
 func (h *UrlShortHandler) HandleCustomUrl(w http.ResponseWriter, r *http.Request) {
-	shortUrl := r.FormValue("short_url")
-	customUrl := r.FormValue("custom_url")
+	var request UpdateCustomUrl
+	err := json.NewDecoder(r.Body).Decode(&request)
+	if err != nil {
+		WriteResponseWithError(w, Error{
+			Status: http.StatusBadRequest,
+			Detail: err.Error(),
+		})
+		return
+	}
 
-	if !govalidator.IsURL(shortUrl) {
+	if !govalidator.IsURL(request.ShortUrl) {
 		// TODO logging
 		WriteResponseWithError(w, Error{
 			Status: http.StatusBadRequest,
 			Detail: "Short url is not valid.",
 		})
 		return
+	}
+
+	customUrl := request.CustomUrl
+	if !strings.HasPrefix(request.CustomUrl, h.BaseUrl) {
+		customUrl = h.BaseUrl + "/" + request.CustomUrl
 	}
 
 	if !govalidator.IsURL(customUrl) {
@@ -128,12 +153,8 @@ func (h *UrlShortHandler) HandleCustomUrl(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if !strings.HasPrefix(customUrl, h.BaseUrl) {
-		customUrl = h.BaseUrl + "/" + customUrl
-	}
-
 	userInsert := `UPDATE urls SET custom_url = $1 WHERE short_url = $2;`
-	result, err := h.Db.Exec(userInsert, customUrl, shortUrl)
+	result, err := h.Db.Exec(userInsert, customUrl, request.ShortUrl)
 
 	if err != nil {
 		fmt.Println(err)
@@ -162,8 +183,8 @@ func (h *UrlShortHandler) HandleCustomUrl(w http.ResponseWriter, r *http.Request
 
 	if num == 1 {
 		// TODO logging
-		WriteSuccessResponse(w, http.StatusOK, Result{
-			ShortUrl:  shortUrl,
+		WriteSuccessResponse(w, http.StatusOK, UpdateCustomUrl{
+			ShortUrl:  request.ShortUrl,
 			CustomUrl: customUrl,
 		})
 
@@ -177,9 +198,9 @@ func (h *UrlShortHandler) HandleCustomUrl(w http.ResponseWriter, r *http.Request
 	// TODO logging
 }
 
-func WriteSuccessResponse(w http.ResponseWriter, responseCode int, r Result) {
+func WriteSuccessResponse(w http.ResponseWriter, responseCode int, r UpdateCustomUrl) {
 	response := make(map[string]interface{})
-	response["data"] = [1]Result{r}
+	response["data"] = [1]UpdateCustomUrl{r}
 	bytes, _ := json.MarshalIndent(response, "", "    ")
 
 	w.WriteHeader(responseCode)

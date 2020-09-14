@@ -42,32 +42,77 @@
 
 ### API методы 
 
-Request POST:
-`{
-    origin_url
-}
-`
+***Метод сокращения заданного исходного URL***
 
-Response:
+Запрос:
 
+```
+curl --header "Content-Type: application/json"   
+    --request POST   
+    --data '{"origin_url": "<URL>"}'   
+    http://localhost:8080/api
+```
+
+Ответ в случае успеха:
+```
 {
-    url_shortener
+    "data": [
+        {
+            "short_url": "some_short_url"
+        }
+    ]
 }
+```
 
-
-
-Request PATCH:
+Формат ответа в случае ошибки:
+```
 {
-    url_shortener
-    custom_url
+    "errors": [{
+        "status": "500",
+        "detail": "some description"
+    }]
 }
+```
 
-Response:
+***Метод задания кастомного URL по заданному сокращенногому URL***
 
-HTTP Code
+Запрос:
+
+```
+curl --header "Content-Type: application/json"   
+    --request PATCH   
+    --data '{"short_url": "<SHORT_URL>", "custom_url": "<CUSTOM_URL>"}'   
+    http://localhost:8080/api
+```
+
+Ответ в случае успеха:
+```
 {
-    error string
+    "data": [
+        {
+            "short_url": "some_short_url",
+            "custom_url": "some_custom_url"
+        }
+    ]
 }
+```
 
-     not null  unique    unique
-id origin_url short_url custom_url
+Формат ответа в случае ошибки:
+```
+{
+    "errors": [{
+        "status": "500",
+        "detail": "some description"
+    }]
+}
+```
+
+Сокращение URL по заданному исходному URL, test curl:
+```
+curl --header "Content-Type: application/json" --request POST --data '{"origin_url": "google.com"}' http://localhost:8080/api
+```
+
+Задание кастомного URL по заданному сокращенному URL, test curl:
+```
+curl --header "Content-Type: application/json" --request PATCH --data '{"short_url": "localhost:8080/1", "custom_url": "some_url"}' http://localhost:8080/api
+```
