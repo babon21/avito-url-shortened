@@ -3,9 +3,11 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/asaskevich/govalidator"
 	"github.com/babon21/avito-url-shortened/utils"
 	"github.com/jmoiron/sqlx"
 	"net/http"
+	"strings"
 )
 
 type UrlShortHandler struct {
@@ -26,12 +28,18 @@ type Error struct {
 func (h *UrlShortHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// TODO logging
-	//fmt.Println("Serve this url!")
 
 	if r.URL.Path != "/api" {
 		// TODO logging
-		// TODO получить origin url из базы по short url или custom url
-		http.Redirect(w, r, "mail.ru", http.StatusSeeOther)
+		var originUrl string
+		resultUrl := h.BaseUrl + r.URL.Path
+		h.Db.QueryRow("SELECT origin_url FROM urls WHERE short_url = $1 OR custom_url = $2", resultUrl, resultUrl).Scan(&originUrl)
+
+		if !strings.HasPrefix(originUrl, "http://") && !strings.HasPrefix(originUrl, "https://") {
+			originUrl = "http://" + originUrl
+		}
+
+		http.Redirect(w, r, originUrl, http.StatusSeeOther)
 		return
 	}
 
@@ -50,19 +58,26 @@ func (h *UrlShortHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func generateUrl(id uint64) string {
-	return utils.ToBase62(id)
+func (h *UrlShortHandler) generateUrl(id uint64) string {
+	encodedId := utils.ToBase62(id)
+	return h.BaseUrl + "/" + encodedId
 }
 
 func (h *UrlShortHandler) HandleShortUrl(w http.ResponseWriter, r *http.Request) {
 	// TODO logging
 
-	// validate request url
-
-	url := r.FormValue("origin_url")
+	urlParam := r.FormValue("origin_url")
+	if !govalidator.IsURL(urlParam) {
+		// TODO logging
+		WriteResponseWithError(w, Error{
+			Status: http.StatusBadRequest,
+			Detail: "Origin url is not valid.",
+		})
+		return
+	}
 
 	var id uint64
-	err := h.Db.QueryRow("INSERT INTO urls(origin_url) VALUES ($1) RETURNING id", url).Scan(&id)
+	err := h.Db.QueryRow("INSERT INTO urls(origin_url) VALUES ($1) RETURNING id", urlParam).Scan(&id)
 	if err != nil {
 		fmt.Println(err)
 		// TODO logging
@@ -73,7 +88,7 @@ func (h *UrlShortHandler) HandleShortUrl(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	generatedUrl := generateUrl(id)
+	generatedUrl := h.generateUrl(id)
 
 	userInsert := "UPDATE urls SET short_url = $1 WHERE id = $2"
 	_, err = h.Db.Exec(userInsert, generatedUrl, id)
@@ -92,12 +107,30 @@ func (h *UrlShortHandler) HandleShortUrl(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *UrlShortHandler) HandleCustomUrl(w http.ResponseWriter, r *http.Request) {
-
-	// validate request url
-
-	shortUrl := r.FormValue("url_shortener")
+	shortUrl := r.FormValue("short_url")
 	customUrl := r.FormValue("custom_url")
-	// validate post param
+
+	if !govalidator.IsURL(shortUrl) {
+		// TODO logging
+		WriteResponseWithError(w, Error{
+			Status: http.StatusBadRequest,
+			Detail: "Short url is not valid.",
+		})
+		return
+	}
+
+	if !govalidator.IsURL(customUrl) {
+		// TODO logging
+		WriteResponseWithError(w, Error{
+			Status: http.StatusBadRequest,
+			Detail: "Custom url is not valid.",
+		})
+		return
+	}
+
+	if !strings.HasPrefix(customUrl, h.BaseUrl) {
+		customUrl = h.BaseUrl + "/" + customUrl
+	}
 
 	userInsert := `UPDATE urls SET custom_url = $1 WHERE short_url = $2;`
 	result, err := h.Db.Exec(userInsert, customUrl, shortUrl)
@@ -129,7 +162,6 @@ func (h *UrlShortHandler) HandleCustomUrl(w http.ResponseWriter, r *http.Request
 
 	if num == 1 {
 		// TODO logging
-		fmt.Println("num == 1")
 		WriteSuccessResponse(w, http.StatusOK, Result{
 			ShortUrl:  shortUrl,
 			CustomUrl: customUrl,
