@@ -1,5 +1,5 @@
 db_user: avito
-db_host: localhost
+db_host: database
 db_port: 5432
 db_name: avito
 db_password: avito
