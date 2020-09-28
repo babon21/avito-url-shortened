@@ -3,16 +3,17 @@ package handlers
 import (
 	"encoding/json"
 	"github.com/asaskevich/govalidator"
+	"github.com/babon21/avito-url-shortened/db"
 	"github.com/babon21/avito-url-shortened/utils"
-	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog/log"
+	"io"
 	"net/http"
 	"strings"
 )
 
 type UrlShortHandler struct {
 	BaseUrl string
-	Db      *sqlx.DB
+	Db      db.DbUrlClient
 }
 
 type UpdateCustomUrl struct {
@@ -29,30 +30,25 @@ type Error struct {
 	Detail string `json:"detail"`
 }
 
+func (e Error) Error() string {
+	return e.Detail
+}
+
 func (h *UrlShortHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Info().Msg("Receive request with URL: " + r.URL.Path)
 
 	if r.URL.Path != "/api" {
-		var originUrl string
-		resultUrl := h.BaseUrl + r.URL.Path
-		h.Db.QueryRow("SELECT origin_url FROM urls WHERE short_url = $1 OR custom_url = $2", resultUrl, resultUrl).Scan(&originUrl)
-
-		if !strings.HasPrefix(originUrl, "http://") && !strings.HasPrefix(originUrl, "https://") {
-			originUrl = "http://" + originUrl
-		}
-
-		log.Info().Msg("Redirect to " + originUrl + " by " + resultUrl)
-		http.Redirect(w, r, originUrl, http.StatusSeeOther)
+		h.redirect(w, r)
 		return
 	}
 
 	switch r.Method {
 	case http.MethodPost:
-		h.HandleShortUrl(w, r)
+		h.handleShortUrl(w, r)
 	case http.MethodPatch:
-		h.HandleCustomUrl(w, r)
+		h.handleCustomUrl(w, r)
 	default:
-		WriteResponseWithError(w, Error{
+		writeResponseWithError(w, Error{
 			Status: http.StatusBadRequest,
 			Detail: "Invalid HTTP method",
 		})
@@ -60,149 +56,191 @@ func (h *UrlShortHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *UrlShortHandler) handleShortUrl(w http.ResponseWriter, r *http.Request) {
+	log.Info().Msg("Handle url shortener endpoint")
+
+	request, err := decodeShortUrlRequest(r.Body)
+	if err != nil {
+		writeResponseWithError(w, *err)
+		return
+	}
+
+	log.Info().Msg("Request origin URL: " + request.OriginUrl)
+
+	err = validateShortUrlRequest(request)
+	if err != nil {
+		writeResponseWithError(w, *err)
+	}
+
+	shortUrl, err := h.shortenUrl(request)
+	if err != nil {
+		writeResponseWithError(w, *err)
+		return
+	}
+
+	writeSuccessResponse(w, http.StatusCreated, UpdateCustomUrl{ShortUrl: shortUrl})
+}
+
+func validateShortUrlRequest(request *ShortUrlRequest) *Error {
+	if !govalidator.IsURL(request.OriginUrl) {
+		log.Error().Msg("origin url param isn't URL: " + request.OriginUrl)
+
+		return &Error{
+			Status: http.StatusBadRequest,
+			Detail: "Origin url is not valid.",
+		}
+	}
+
+	return nil
+}
+
+func decodeShortUrlRequest(body io.ReadCloser) (*ShortUrlRequest, *Error) {
+	var request ShortUrlRequest
+
+	err := json.NewDecoder(body).Decode(&request)
+	if err != nil {
+		log.Err(err).Send()
+
+		return nil, &Error{
+			Status: http.StatusBadRequest,
+			Detail: err.Error(),
+		}
+	}
+
+	return &request, nil
+}
+
+func (h *UrlShortHandler) handleCustomUrl(w http.ResponseWriter, r *http.Request) {
+	log.Info().Msg("Handle update custom url endpoint.")
+
+	var request, err = decodeUpdateCustomUrlRequest(r.Body)
+	if err != nil {
+		writeResponseWithError(w, *err)
+		return
+	}
+
+	err = validateUpdateCustomURlRequest(request)
+	if err != nil {
+		writeResponseWithError(w, *err)
+		return
+	}
+
+	err = h.UpdateCustomUrl(request)
+	if err != nil {
+		writeResponseWithError(w, *err)
+		return
+	}
+
+	writeSuccessResponse(w, http.StatusOK, UpdateCustomUrl{
+		ShortUrl:  request.ShortUrl,
+		CustomUrl: request.CustomUrl,
+	})
+}
+
+func (h *UrlShortHandler) UpdateCustomUrl(request *UpdateCustomUrl) *Error {
+	num, err := h.Db.UpdateCustomUrl(request.CustomUrl, request.ShortUrl)
+	if err != nil {
+		log.Err(err).Send()
+
+		return &Error{
+			Status: http.StatusUnprocessableEntity,
+			Detail: "This custom url is already taken.",
+		}
+	}
+
+	if num != 1 {
+		log.Err(err).Send()
+
+		return &Error{
+			Status: http.StatusNotFound,
+			Detail: "Short url doesn't exist.",
+		}
+	}
+
+	return nil
+}
+
+func (h *UrlShortHandler) redirect(w http.ResponseWriter, r *http.Request) {
+	resultUrl := h.BaseUrl + r.URL.Path
+	originUrl := h.Db.GetOriginUrl(resultUrl)
+
+	if !strings.HasPrefix(originUrl, "http://") && !strings.HasPrefix(originUrl, "https://") {
+		originUrl = "http://" + originUrl
+	}
+
+	log.Info().Msg("Redirect to " + originUrl + " by " + resultUrl)
+	http.Redirect(w, r, originUrl, http.StatusSeeOther)
+}
+
+func decodeUpdateCustomUrlRequest(body io.ReadCloser) (*UpdateCustomUrl, *Error) {
+	var request UpdateCustomUrl
+	err := json.NewDecoder(body).Decode(&request)
+	if err != nil {
+		log.Err(err).Send()
+
+		return nil, &Error{
+			Status: http.StatusBadRequest,
+			Detail: err.Error(),
+		}
+	}
+
+	return &request, nil
+}
+
+func validateUpdateCustomURlRequest(request *UpdateCustomUrl) *Error {
+	if !govalidator.IsURL(request.ShortUrl) {
+		log.Error().Msg("short url param isn't URL: " + request.ShortUrl)
+
+		return &Error{
+			Status: http.StatusBadRequest,
+			Detail: "Short url is not valid.",
+		}
+	}
+
+	if !govalidator.IsURL(request.CustomUrl) {
+		log.Error().Msg("custom url param isn't URL: " + request.ShortUrl)
+
+		return &Error{
+			Status: http.StatusBadRequest,
+			Detail: "Custom url is not valid.",
+		}
+	}
+
+	return nil
+}
+
 func (h *UrlShortHandler) generateUrl(id uint64) string {
 	encodedId := utils.ToBase62(id)
 	return h.BaseUrl + "/" + encodedId
 }
 
-func (h *UrlShortHandler) HandleShortUrl(w http.ResponseWriter, r *http.Request) {
-	log.Info().Msg("Handle url shortener endpoint")
-
-	var request ShortUrlRequest
-	err := json.NewDecoder(r.Body).Decode(&request)
+func (h *UrlShortHandler) shortenUrl(request *ShortUrlRequest) (string, *Error) {
+	id, err := h.Db.AddUrl(request.OriginUrl)
 	if err != nil {
 		log.Err(err).Send()
 
-		WriteResponseWithError(w, Error{
-			Status: http.StatusBadRequest,
-			Detail: err.Error(),
-		})
-		return
-	}
-	log.Info().Msg("Request origin URL: " + request.OriginUrl)
-
-	if !govalidator.IsURL(request.OriginUrl) {
-		log.Error().Msg("origin url param isn't URL: " + request.OriginUrl)
-
-		WriteResponseWithError(w, Error{
-			Status: http.StatusBadRequest,
-			Detail: "Origin url is not valid.",
-		})
-		return
-	}
-
-	var id uint64
-	err = h.Db.QueryRow("INSERT INTO urls(origin_url) VALUES ($1) RETURNING id", request.OriginUrl).Scan(&id)
-	if err != nil {
-		log.Err(err).Send()
-
-		WriteResponseWithError(w, Error{
+		return "", &Error{
 			Status: http.StatusInternalServerError,
 			Detail: "Error while adding origin url to db.",
-		})
-		return
+		}
 	}
 
-	generatedUrl := h.generateUrl(id)
-
-	userInsert := "UPDATE urls SET short_url = $1 WHERE id = $2"
-	_, err = h.Db.Exec(userInsert, generatedUrl, id)
+	shortUrl := h.generateUrl(id)
+	err = h.Db.AddShortUrl(shortUrl, id)
 
 	if err != nil {
 		log.Err(err).Send()
 
-		WriteResponseWithError(w, Error{
+		return "", &Error{
 			Status: http.StatusInternalServerError,
 			Detail: "Error while adding generated short url to db.",
-		})
-		return
+		}
 	}
 
-	WriteSuccessResponse(w, http.StatusCreated, UpdateCustomUrl{ShortUrl: generatedUrl})
+	return shortUrl, nil
 }
 
-func (h *UrlShortHandler) HandleCustomUrl(w http.ResponseWriter, r *http.Request) {
-	log.Info().Msg("Handle update custom url endpoint.")
-
-	var request UpdateCustomUrl
-	err := json.NewDecoder(r.Body).Decode(&request)
-	if err != nil {
-		log.Err(err).Send()
-
-		WriteResponseWithError(w, Error{
-			Status: http.StatusBadRequest,
-			Detail: err.Error(),
-		})
-		return
-	}
-
-	if !govalidator.IsURL(request.ShortUrl) {
-		log.Error().Msg("origin url param isn't URL: " + request.ShortUrl)
-
-		WriteResponseWithError(w, Error{
-			Status: http.StatusBadRequest,
-			Detail: "Short url is not valid.",
-		})
-		return
-	}
-
-	customUrl := request.CustomUrl
-	if !strings.HasPrefix(request.CustomUrl, h.BaseUrl) {
-		customUrl = h.BaseUrl + "/" + request.CustomUrl
-	}
-
-	if !govalidator.IsURL(customUrl) {
-		log.Error().Msg("Invalid custom_url param: " + request.ShortUrl)
-
-		WriteResponseWithError(w, Error{
-			Status: http.StatusBadRequest,
-			Detail: "Custom url is not valid.",
-		})
-		return
-	}
-
-	userInsert := `UPDATE urls SET custom_url = $1 WHERE short_url = $2;`
-	result, err := h.Db.Exec(userInsert, customUrl, request.ShortUrl)
-
-	if err != nil {
-		log.Err(err).Send()
-
-		WriteResponseWithError(w, Error{
-			Status: http.StatusUnprocessableEntity,
-			Detail: "This custom url is already taken.",
-		})
-		return
-	}
-
-	num, err := result.RowsAffected()
-	if err != nil {
-		log.Err(err).Send()
-
-		WriteResponseWithError(w, Error{
-			Status: http.StatusInternalServerError,
-			Detail: "Error while getting id from database.",
-		})
-
-		return
-	}
-
-	if num == 1 {
-		WriteSuccessResponse(w, http.StatusOK, UpdateCustomUrl{
-			ShortUrl:  request.ShortUrl,
-			CustomUrl: customUrl,
-		})
-
-		return
-	}
-
-	log.Error().Msg("Database is in the incorrect state.")
-	WriteResponseWithError(w, Error{
-		Status: http.StatusInternalServerError,
-		Detail: "Database is in the incorrect state.",
-	})
-}
-
-func WriteSuccessResponse(w http.ResponseWriter, responseCode int, r UpdateCustomUrl) {
+func writeSuccessResponse(w http.ResponseWriter, responseCode int, r UpdateCustomUrl) {
 	response := make(map[string]interface{})
 	response["data"] = [1]UpdateCustomUrl{r}
 	bytes, _ := json.MarshalIndent(response, "", "    ")
@@ -211,7 +249,7 @@ func WriteSuccessResponse(w http.ResponseWriter, responseCode int, r UpdateCusto
 	w.Write(bytes)
 }
 
-func WriteResponseWithError(w http.ResponseWriter, e Error) {
+func writeResponseWithError(w http.ResponseWriter, e Error) {
 	response := make(map[string]interface{})
 	response["errors"] = [1]Error{e}
 	bytes, _ := json.MarshalIndent(response, "", "    ")
